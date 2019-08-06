@@ -250,22 +250,19 @@ func Export(ctx context.Context, store content.Provider, writer io.Writer, opts 
 
 func getRecords(ctx context.Context, store content.Provider, desc ocispec.Descriptor, algorithms map[string]struct{}) ([]tarRecord, error) {
 	var records []tarRecord
-	exportHandler := func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+	var handlerBundle images.Handlers
+
+	handlerBundle.Add(images.SetupHandler(func(ctx context.Context, parent ocispec.Descriptor) error {
 		records = append(records, blobRecord(store, desc))
 		algorithms[desc.Digest.Algorithm().String()] = struct{}{}
-		return nil, nil
-	}
 
-	childrenHandler := images.ChildrenHandler(store)
-
-	handlers := images.Handlers(
-		childrenHandler,
-		images.HandlerFunc(exportHandler),
-	)
+		return nil
+	}))
+	handlerBundle.Add(images.ChildrenHandler(store))
 
 	// Walk sequentially since the number of fetchs is likely one and doing in
 	// parallel requires locking the export handler
-	if err := images.Walk(ctx, handlers, desc); err != nil {
+	if err := images.Walk(ctx, handlerBundle.Build(), desc); err != nil {
 		return nil, err
 	}
 

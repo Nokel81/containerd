@@ -123,18 +123,21 @@ func (c *Client) Import(ctx context.Context, reader io.Reader, opts ...ImportOpt
 			Target: index,
 		})
 	}
+
 	var platformMatcher = platforms.All
 	if !iopts.allPlatforms {
 		platformMatcher = platforms.Default()
 	}
 
-	var handler images.HandlerFunc = func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+	var handlerBundle images.Handlers
+
+	handlerBundle.Add(images.FindHandler(func(ctx context.Context, parent ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		// Only save images at top level
-		if desc.Digest != index.Digest {
-			return images.Children(ctx, cs, desc)
+		if parent.Digest != index.Digest {
+			return images.Children(ctx, cs, parent)
 		}
 
-		p, err := content.ReadBlob(ctx, cs, desc)
+		p, err := content.ReadBlob(ctx, cs, parent)
 		if err != nil {
 			return nil, err
 		}
@@ -146,12 +149,14 @@ func (c *Client) Import(ctx context.Context, reader io.Reader, opts ...ImportOpt
 
 		for _, m := range idx.Manifests {
 			name := imageName(m.Annotations, iopts.imageRefT)
+
 			if name != "" {
 				imgs = append(imgs, images.Image{
 					Name:   name,
 					Target: m,
 				})
 			}
+
 			if iopts.dgstRefT != nil {
 				ref := iopts.dgstRefT(m.Digest)
 				if ref != "" {
@@ -164,11 +169,11 @@ func (c *Client) Import(ctx context.Context, reader io.Reader, opts ...ImportOpt
 		}
 
 		return idx.Manifests, nil
-	}
+	}))
+	handlerBundle.Add(images.FilterPlatforms(platformMatcher))
+	handlerBundle.Add(images.SetChildrenLabels(cs))
 
-	handler = images.FilterPlatforms(handler, platformMatcher)
-	handler = images.SetChildrenLabels(cs, handler)
-	if err := images.Walk(ctx, handler, index); err != nil {
+	if err := images.Walk(ctx, handlerBundle.Build(), index); err != nil {
 		return nil, err
 	}
 
