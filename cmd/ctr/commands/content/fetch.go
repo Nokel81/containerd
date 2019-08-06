@@ -135,11 +135,12 @@ func Fetch(ctx context.Context, client *containerd.Client, ref string, config *F
 		close(progress)
 	}()
 
-	h := images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		if desc.MediaType != images.MediaTypeDockerSchema1Manifest {
-			ongoing.add(desc)
+	setup := images.SetupHandler(func(ctx context.Context, parent ocispec.Descriptor) error {
+		if parent.MediaType != images.MediaTypeDockerSchema1Manifest {
+			ongoing.add(parent)
 		}
-		return nil, nil
+
+		return nil
 	})
 
 	log.G(pctx).WithField("image", ref).Debug("fetching")
@@ -147,7 +148,7 @@ func Fetch(ctx context.Context, client *containerd.Client, ref string, config *F
 	opts := []containerd.RemoteOpt{
 		containerd.WithPullLabels(labels),
 		containerd.WithResolver(config.Resolver),
-		containerd.WithImageHandler(h),
+		containerd.WithSetupHandler(setup),
 		containerd.WithSchema1Conversion,
 		containerd.WithAppendDistributionSourceLabel(),
 	}

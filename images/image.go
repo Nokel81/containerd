@@ -113,13 +113,23 @@ func (image *Image) RootFS(ctx context.Context, provider content.Provider, platf
 // Size returns the total size of an image's packed resources.
 func (image *Image) Size(ctx context.Context, provider content.Provider, platform platforms.MatchComparer) (int64, error) {
 	var size int64
-	return size, Walk(ctx, Handlers(HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		if desc.Size < 0 {
-			return nil, errors.Errorf("invalid size %v in %v (%v)", desc.Size, desc.Digest, desc.MediaType)
+	var handlerBundle Handlers
+
+	handlerBundle.Add(ObserveHandler(func(ctx context.Context, parent ocispec.Descriptor, children []ocispec.Descriptor) error {
+		for _, child := range children {
+			if child.Size < 0 {
+				return errors.Errorf("invalid size %v in %v (%v)", child.Size, child.Digest, child.MediaType)
+			}
+
+			size += child.Size
 		}
-		size += desc.Size
-		return nil, nil
-	}), FilterPlatforms(ChildrenHandler(provider), platform)), image.Target)
+
+		return nil
+	}))
+	handlerBundle.Add(ChildrenHandler(provider))
+	handlerBundle.Add(FilterPlatforms(platform))
+
+	return size, Walk(ctx, handlerBundle.Build(), image.Target)
 }
 
 type platformManifest struct {
@@ -139,18 +149,19 @@ type platformManifest struct {
 // TODO(stevvooe): This violates the current platform agnostic approach to this
 // package by returning a specific manifest type. We'll need to refactor this
 // to return a manifest descriptor or decide that we want to bring the API in
-// this direction because this abstraction is not needed.`
+// this direction because this abstraction is not needed.
 func Manifest(ctx context.Context, provider content.Provider, image ocispec.Descriptor, platform platforms.MatchComparer) (ocispec.Manifest, error) {
 	var (
-		limit    = 1
-		m        []platformManifest
-		wasIndex bool
+		limit         = 1
+		m             []platformManifest
+		wasIndex      bool
+		handlerBundle Handlers
 	)
 
-	if err := Walk(ctx, HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		switch desc.MediaType {
+	handlerBundle.Add(FindHandler(func(ctx context.Context, parent ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+		switch parent.MediaType {
 		case MediaTypeDockerSchema2Manifest, ocispec.MediaTypeImageManifest:
-			p, err := content.ReadBlob(ctx, provider, desc)
+			p, err := content.ReadBlob(ctx, provider, parent)
 			if err != nil {
 				return nil, err
 			}
@@ -160,12 +171,12 @@ func Manifest(ctx context.Context, provider content.Provider, image ocispec.Desc
 				return nil, err
 			}
 
-			if desc.Digest != image.Digest && platform != nil {
-				if desc.Platform != nil && !platform.Match(*desc.Platform) {
+			if parent.Digest != image.Digest && platform != nil {
+				if parent.Platform != nil && !platform.Match(*parent.Platform) {
 					return nil, nil
 				}
 
-				if desc.Platform == nil {
+				if parent.Platform == nil {
 					p, err := content.ReadBlob(ctx, provider, manifest.Config)
 					if err != nil {
 						return nil, err
@@ -184,13 +195,13 @@ func Manifest(ctx context.Context, provider content.Provider, image ocispec.Desc
 			}
 
 			m = append(m, platformManifest{
-				p: desc.Platform,
+				p: parent.Platform,
 				m: &manifest,
 			})
 
 			return nil, nil
 		case MediaTypeDockerSchema2ManifestList, ocispec.MediaTypeImageIndex:
-			p, err := content.ReadBlob(ctx, provider, desc)
+			p, err := content.ReadBlob(ctx, provider, parent)
 			if err != nil {
 				return nil, err
 			}
@@ -228,18 +239,24 @@ func Manifest(ctx context.Context, provider content.Provider, image ocispec.Desc
 			}
 			return descs, nil
 		}
-		return nil, errors.Wrapf(errdefs.ErrNotFound, "unexpected media type %v for %v", desc.MediaType, desc.Digest)
-	}), image); err != nil {
+
+		return nil, errors.Wrapf(errdefs.ErrNotFound, "unexpected media type %v for %v", parent.MediaType, parent.Digest)
+	}))
+
+	if err := Walk(ctx, handlerBundle.Build(), image); err != nil {
 		return ocispec.Manifest{}, err
 	}
 
 	if len(m) == 0 {
 		err := errors.Wrapf(errdefs.ErrNotFound, "manifest %v", image.Digest)
+
 		if wasIndex {
 			err = errors.Wrapf(errdefs.ErrNotFound, "no match for platform in manifest %v", image.Digest)
 		}
+
 		return ocispec.Manifest{}, err
 	}
+
 	return *m[0].m, nil
 }
 
@@ -259,29 +276,34 @@ func Config(ctx context.Context, provider content.Provider, image ocispec.Descri
 // Platforms returns one or more platforms supported by the image.
 func Platforms(ctx context.Context, provider content.Provider, image ocispec.Descriptor) ([]ocispec.Platform, error) {
 	var platformSpecs []ocispec.Platform
-	return platformSpecs, Walk(ctx, Handlers(HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		if desc.Platform != nil {
-			platformSpecs = append(platformSpecs, *desc.Platform)
-			return nil, ErrSkipDesc
+	var handlerBundle Handlers
+
+	handlerBundle.Add(SetupHandler(func(ctx context.Context, parent ocispec.Descriptor) error {
+		if parent.Platform != nil {
+			platformSpecs = append(platformSpecs, *parent.Platform)
+			return ErrSkipDesc
 		}
 
-		switch desc.MediaType {
+		switch parent.MediaType {
 		case MediaTypeDockerSchema2Config, ocispec.MediaTypeImageConfig:
-			p, err := content.ReadBlob(ctx, provider, desc)
+			p, err := content.ReadBlob(ctx, provider, parent)
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			var image ocispec.Image
 			if err := json.Unmarshal(p, &image); err != nil {
-				return nil, err
+				return err
 			}
 
 			platformSpecs = append(platformSpecs,
 				platforms.Normalize(ocispec.Platform{OS: image.OS, Architecture: image.Architecture}))
 		}
-		return nil, nil
-	}), ChildrenHandler(provider)), image)
+		return nil
+	}))
+	handlerBundle.Add(ChildrenHandler(provider))
+
+	return platformSpecs, Walk(ctx, handlerBundle.Build(), image)
 }
 
 // Check returns nil if the all components of an image are available in the

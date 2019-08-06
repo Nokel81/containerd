@@ -109,14 +109,15 @@ var pushCommand = cli.Command{
 
 			log.G(ctx).WithField("image", ref).WithField("digest", desc.Digest).Debug("pushing")
 
-			jobHandler := images.HandlerFunc(func(ctx gocontext.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+			setup := images.SetupHandler(func(ctx gocontext.Context, parent ocispec.Descriptor) error {
 				ongoing.add(remotes.MakeRefKey(ctx, desc))
-				return nil, nil
+
+				return nil
 			})
 
 			return client.Push(ctx, ref, desc,
 				containerd.WithResolver(resolver),
-				containerd.WithImageHandler(jobHandler),
+				containerd.WithSetupHandler(setup),
 			)
 		})
 

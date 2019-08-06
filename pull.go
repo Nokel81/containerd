@@ -90,8 +90,7 @@ func (c *Client) fetch(ctx context.Context, rCtx *RemoteContext, ref string, lim
 	}
 
 	var (
-		handler images.Handler
-
+		handlerBundle images.Handlers
 		isConvertible bool
 		converterFunc func(context.Context, ocispec.Descriptor) (ocispec.Descriptor, error)
 		limiter       *semaphore.Weighted
@@ -99,43 +98,36 @@ func (c *Client) fetch(ctx context.Context, rCtx *RemoteContext, ref string, lim
 
 	if desc.MediaType == images.MediaTypeDockerSchema1Manifest && rCtx.ConvertSchema1 {
 		schema1Converter := schema1.NewConverter(store, fetcher)
-
-		handler = images.Handlers(append(rCtx.BaseHandlers, schema1Converter)...)
-
 		isConvertible = true
+
+		handlerBundle.Add(schema1Converter)
 
 		converterFunc = func(ctx context.Context, _ ocispec.Descriptor) (ocispec.Descriptor, error) {
 			return schema1Converter.Convert(ctx)
 		}
 	} else {
-		// Get all the children for a descriptor
-		childrenHandler := images.ChildrenHandler(store)
-		// Set any children labels for that content
-		childrenHandler = images.SetChildrenLabels(store, childrenHandler)
-		// Filter manifests by platforms but allow to handle manifest
-		// and configuration for not-target platforms
-		childrenHandler = remotes.FilterManifestByPlatformHandler(childrenHandler, rCtx.PlatformMatcher)
-		// Sort and limit manifests if a finite number is needed
-		if limit > 0 {
-			childrenHandler = images.LimitManifests(childrenHandler, rCtx.PlatformMatcher, limit)
-		}
+		handlerBundle.Add(remotes.FetchHandler(store, fetcher))
 
 		// set isConvertible to true if there is application/octet-stream media type
-		convertibleHandler := images.HandlerFunc(
-			func(_ context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-				if desc.MediaType == docker.LegacyConfigMediaType {
-					isConvertible = true
-				}
+		handlerBundle.Add(images.SetupHandler(func(ctx context.Context, parent ocispec.Descriptor) error {
+			isConvertible = isConvertible || desc.MediaType == docker.LegacyConfigMediaType
 
-				return []ocispec.Descriptor{}, nil
-			},
-		)
+			return nil
+		}))
 
-		handlers := append(rCtx.BaseHandlers,
-			remotes.FetchHandler(store, fetcher),
-			convertibleHandler,
-			childrenHandler,
-		)
+		// Get all the children for a descriptor
+		handlerBundle.Add(images.ChildrenHandler(store))
+		// Set any children labels for that content
+		handlerBundle.Add(images.SetChildrenLabels(store))
+		// Filter manifests by platforms but allow to handle manifest
+		// and configuration for not-target platforms
+		handlerBundle.Add(remotes.FilterManifestByPlatformHandler(rCtx.PlatformMatcher))
+
+		// Sort and limit manifests if a finite number is needed
+		if limit > 0 {
+			handlerBundle.Add(images.SortManifests(rCtx.PlatformMatcher))
+			handlerBundle.Add(images.LimitManifests(limit))
+		}
 
 		// append distribution source label to blob data
 		if rCtx.AppendDistributionSourceLabel {
@@ -144,25 +136,19 @@ func (c *Client) fetch(ctx context.Context, rCtx *RemoteContext, ref string, lim
 				return images.Image{}, err
 			}
 
-			handlers = append(handlers, appendDistSrcLabelHandler)
+			handlerBundle.Add(appendDistSrcLabelHandler)
 		}
-
-		handler = images.Handlers(handlers...)
 
 		converterFunc = func(ctx context.Context, desc ocispec.Descriptor) (ocispec.Descriptor, error) {
 			return docker.ConvertManifest(ctx, store, desc)
 		}
 	}
 
-	if rCtx.HandlerWrapper != nil {
-		handler = rCtx.HandlerWrapper(handler)
-	}
-
 	if rCtx.MaxConcurrentDownloads > 0 {
 		limiter = semaphore.NewWeighted(int64(rCtx.MaxConcurrentDownloads))
 	}
 
-	if err := images.Dispatch(ctx, handler, limiter, desc); err != nil {
+	if err := images.Dispatch(ctx, handlerBundle.Build(), limiter, desc); err != nil {
 		return images.Image{}, err
 	}
 
@@ -180,25 +166,26 @@ func (c *Client) fetch(ctx context.Context, rCtx *RemoteContext, ref string, lim
 
 	is := c.ImageService()
 	for {
-		if created, err := is.Create(ctx, img); err != nil {
-			if !errdefs.IsAlreadyExists(err) {
-				return images.Image{}, err
-			}
+		created, err := is.Create(ctx, img)
 
-			updated, err := is.Update(ctx, img)
-			if err != nil {
-				// if image was removed, try create again
-				if errdefs.IsNotFound(err) {
-					continue
-				}
-				return images.Image{}, err
-			}
-
-			img = updated
-		} else {
-			img = created
+		if err == nil {
+			return created, nil
 		}
 
-		return img, nil
+		if !errdefs.IsAlreadyExists(err) {
+			return images.Image{}, err
+		}
+
+		updated, err := is.Update(ctx, img)
+		if err == nil {
+			return updated, nil
+		}
+
+		// if image was removed, try create again
+		if errdefs.IsNotFound(err) {
+			continue
+		}
+
+		return images.Image{}, err
 	}
 }

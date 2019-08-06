@@ -171,18 +171,50 @@ func WithResolver(resolver remotes.Resolver) RemoteOpt {
 	}
 }
 
-// WithImageHandler adds a base handler to be called on dispatch.
-func WithImageHandler(h images.Handler) RemoteOpt {
+// WithSetupHandler adds a setup handler to be called on dispatch.
+func WithSetupHandler(handler images.SetupHandler) RemoteOpt {
 	return func(client *Client, c *RemoteContext) error {
-		c.BaseHandlers = append(c.BaseHandlers, h)
+		c.SetupHandlers = append(c.SetupHandlers, handler)
 		return nil
 	}
 }
 
-// WithImageHandlerWrapper wraps the handlers to be called on dispatch.
-func WithImageHandlerWrapper(w func(images.Handler) images.Handler) RemoteOpt {
+// WithFindHandler adds a find handler to be called on dispatch.
+func WithFindHandler(handler images.FindHandler) RemoteOpt {
 	return func(client *Client, c *RemoteContext) error {
-		c.HandlerWrapper = w
+		c.FindHandlers = append(c.FindHandlers, handler)
+		return nil
+	}
+}
+
+// WithMapHandler adds a map handler to be called on dispatch.
+func WithMapHandler(handler images.MapHandler) RemoteOpt {
+	return func(client *Client, c *RemoteContext) error {
+		c.MapHandlers = append(c.MapHandlers, handler)
+		return nil
+	}
+}
+
+// WithFilterHandler adds a filter handler to be called on dispatch.
+func WithFilterHandler(handler images.FilterHandler) RemoteOpt {
+	return func(client *Client, c *RemoteContext) error {
+		c.FilterHandlers = append(c.FilterHandlers, handler)
+		return nil
+	}
+}
+
+// WithObserveHandler adds an observe handler to be called on dispatch.
+func WithObserveHandler(handler images.ObserveHandler) RemoteOpt {
+	return func(client *Client, c *RemoteContext) error {
+		c.ObserveHandlers = append(c.ObserveHandlers, handler)
+		return nil
+	}
+}
+
+// WithSortHandler adds an sorting handler to be called on dispatch.
+func WithSortHandler(handler images.SortHandler) RemoteOpt {
+	return func(client *Client, c *RemoteContext) error {
+		c.SortHandler = handler
 		return nil
 	}
 }

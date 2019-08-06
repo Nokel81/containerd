@@ -301,16 +301,7 @@ type RemoteContext struct {
 	// Labels to be applied to the created image
 	Labels map[string]string
 
-	// BaseHandlers are a set of handlers which get are called on dispatch.
-	// These handlers always get called before any operation specific
-	// handlers.
-	BaseHandlers []images.Handler
-
-	// HandlerWrapper wraps the handler which gets sent to dispatch.
-	// Unlike BaseHandlers, this can run before and after the built
-	// in handlers, allowing operations to run on the descriptor
-	// after it has completed transferring.
-	HandlerWrapper func(images.Handler) images.Handler
+	images.Handlers
 
 	// ConvertSchema1 is whether to convert Docker registry schema 1
 	// manifests. If this option is false then any image which resolves
@@ -413,21 +404,7 @@ func (c *Client) Push(ctx context.Context, ref string, desc ocispec.Descriptor, 
 		return err
 	}
 
-	var wrapper func(images.Handler) images.Handler
-
-	if len(pushCtx.BaseHandlers) > 0 {
-		wrapper = func(h images.Handler) images.Handler {
-			h = images.Handlers(append(pushCtx.BaseHandlers, h)...)
-			if pushCtx.HandlerWrapper != nil {
-				h = pushCtx.HandlerWrapper(h)
-			}
-			return h
-		}
-	} else if pushCtx.HandlerWrapper != nil {
-		wrapper = pushCtx.HandlerWrapper
-	}
-
-	return remotes.PushContent(ctx, pusher, desc, c.ContentStore(), pushCtx.PlatformMatcher, wrapper)
+	return remotes.PushContent(ctx, pusher, desc, c.ContentStore(), pushCtx.PlatformMatcher)
 }
 
 // GetImage returns an existing image

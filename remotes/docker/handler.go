@@ -36,7 +36,7 @@ var (
 )
 
 // AppendDistributionSourceLabel updates the label of blob with distribution source.
-func AppendDistributionSourceLabel(manager content.Manager, ref string) (images.HandlerFunc, error) {
+func AppendDistributionSourceLabel(manager content.Manager, ref string) (images.ObserveHandler, error) {
 	refspec, err := reference.Parse(ref)
 	if err != nil {
 		return nil, err
@@ -48,18 +48,19 @@ func AppendDistributionSourceLabel(manager content.Manager, ref string) (images.
 	}
 
 	source, repo := u.Hostname(), strings.TrimPrefix(u.Path, "/")
-	return func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		info, err := manager.Info(ctx, desc.Digest)
+	return func(ctx context.Context, parent ocispec.Descriptor, children []ocispec.Descriptor) error {
+		info, err := manager.Info(ctx, parent.Digest)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
-		key := distributionSourceLabelKey(source)
+		var key = distributionSourceLabelKey(source)
+		var originLabel string
 
-		originLabel := ""
 		if info.Labels != nil {
 			originLabel = info.Labels[key]
 		}
+
 		value := appendDistributionSourceLabel(originLabel, repo)
 
 		// The repo name has been limited under 256 and the distribution
@@ -67,17 +68,19 @@ func AppendDistributionSourceLabel(manager content.Manager, ref string) (images.
 		// is used as the very, very common layer.
 		if err := labels.Validate(key, value); err != nil {
 			log.G(ctx).Warnf("skip to append distribution label: %s", err)
-			return nil, nil
+			return nil
 		}
 
 		info = content.Info{
-			Digest: desc.Digest,
+			Digest: parent.Digest,
 			Labels: map[string]string{
 				key: value,
 			},
 		}
+
 		_, err = manager.Update(ctx, info, fmt.Sprintf("labels.%s", key))
-		return nil, err
+
+		return err
 	}, nil
 }
 
